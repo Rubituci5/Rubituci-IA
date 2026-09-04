@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, AsyncGenerator
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from enum import Enum
 
 import httpx
@@ -57,6 +57,20 @@ class SearchConfig:
     rate_limit_per_minute: int = 30
     safe_search: bool = True
     region: str = "wt-wt"  # Worldwide
+
+
+def normalize_search_result_url(url: str) -> str:
+    """Unwrap provider redirect links and return the original public result URL."""
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urlparse(url)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        if target:
+            decoded = unquote(target)
+            if urlparse(decoded).scheme in {"http", "https"}:
+                return decoded
+    return url
 
 
 class WebSearchService:
@@ -215,7 +229,7 @@ class WebSearchService:
                 continue
 
             title = title_elem.get_text(strip=True)
-            url = title_elem.get("href", "")
+            url = normalize_search_result_url(title_elem.get("href", ""))
 
             # Extract snippet
             snippet = result_div.get_text(strip=True)

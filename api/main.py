@@ -1502,6 +1502,9 @@ async def websocket_chat(
                 await websocket.send_json({"type": "error", "error": "Mensagem vazia"})
                 continue
 
+            from learning.lexical import observe_writing
+            await asyncio.to_thread(observe_writing, data)
+
             async with db_manager.session() as history_db:
                 recent_messages = list((await history_db.execute(
                     select(Message)
