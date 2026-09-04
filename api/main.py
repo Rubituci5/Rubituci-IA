@@ -1550,13 +1550,15 @@ async def websocket_chat(
                     response_text = "Não encontrei resultados úteis agora. A web às vezes também olha para o vazio e finge naturalidade. Tente reformular a busca."
             else:
                 from brain.inference import SamplingConfig
-                sampling = SamplingConfig(temperature=0.65, top_k=30, top_p=0.9, repetition_penalty=1.12, max_new_tokens=120, do_sample=True)
+                # Match the evaluated local inference profile. This small model
+                # becomes incoherent with creative sampling or long instructions.
+                sampling = SamplingConfig(temperature=0.2, top_k=20, top_p=0.9, repetition_penalty=1.15, max_new_tokens=60, do_sample=False)
                 dialogue = "\n".join(
                     f"{'User' if message.role == MessageRole.USER else 'Entity'}: {message.content[:500]}"
                     for message in reversed(recent_messages)
                     if message.role in (MessageRole.USER, MessageRole.ENTITY)
                 )
-                prompt = f"{RUBITUCI_PERSONA}\nConsidere toda a conversa abaixo e trate complementos como continuação, não como assunto novo.\n{dialogue}\nUser: {effective_request}\nEntity:"
+                prompt = f"{dialogue}\nUser: {effective_request}\nEntity:" if dialogue else f"User: {effective_request}\nEntity:"
                 response_text = engine.generate(prompt, sampling=sampling).strip()
 
             # WebSocket is the primary frontend path, so persist and learn from
