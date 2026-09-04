@@ -1,0 +1,13 @@
+{
+  "vocab_size": 8192,
+  "min_frequency": 2,
+  "special_tokens": {
+    "<pad>": 0,
+    "<unk>": 1,
+    "<bos>": 2,
+    "<eos>": 3,
+    "<mask>": 4
+  },
+  "pattern": "'(?:[sdmt]|ll|ve|re)| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+",
+  "byte_fallback": true
+}

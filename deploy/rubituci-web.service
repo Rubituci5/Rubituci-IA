@@ -1,0 +1,18 @@
+[Unit]
+Description=Rubituci AI Web
+After=network.target rubituci-api.service
+
+[Service]
+Type=simple
+User=rubituci
+Group=rubituci
+WorkingDirectory=/opt/rubituci-ai/current/web
+Environment=NODE_ENV=production
+Environment=PORT=3020
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node .next/standalone/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

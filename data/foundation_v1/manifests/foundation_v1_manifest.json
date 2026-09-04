@@ -1,0 +1,13 @@
+{
+  "name": "Entity Foundation Corpus v1",
+  "records": 272,
+  "sources": [
+    {
+      "file": "dom_casmurro.txt",
+      "characters": 371457,
+      "chunks": 272
+    }
+  ],
+  "output": "/Users/alexrubituci/entity-project/data/foundation_v1/processed/foundation_v1.jsonl",
+  "sha256": "fed3450ba2499f846dc833117d880513724a81036f66c8b708242dfebf577818"
+}

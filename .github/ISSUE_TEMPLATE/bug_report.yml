@@ -1,0 +1,30 @@
+name: Relatar um bug
+description: Informe um comportamento inesperado e como reproduzi-lo.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: O que aconteceu?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Como reproduzir?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: O que você esperava?
+    validations:
+      required: true
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Segurança
+      options:
+        - label: Confirmei que não incluí senhas, tokens nem dados pessoais.
+          required: true

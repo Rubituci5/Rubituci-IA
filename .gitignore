@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.bak
+*.bak-*
+*.tsbuildinfo
+.pytest_cache/
+.next/
+node_modules/
+.venv/
+backups/
+celerybeat-schedule*
+
+# Checkpoints intermediários são grandes. Versionamos apenas o tokenizador e o
+# peso promovido atual; novas gerações devem preferir GitHub Releases.
+snapshots/**
+!snapshots/generation_000001/
+snapshots/generation_000001/**
+!snapshots/generation_000001/tokenizer/
+!snapshots/generation_000001/tokenizer/**
+!snapshots/generation_000001/rubituci_conversational_v2/
+snapshots/generation_000001/rubituci_conversational_v2/**
+!snapshots/generation_000001/rubituci_conversational_v2/model_weights_rubituci_conversational_v2.pt

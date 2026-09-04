@@ -1,0 +1,18 @@
+[Unit]
+Description=Rubituci AI API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=rubituci
+Group=rubituci
+WorkingDirectory=/opt/rubituci-ai/current
+EnvironmentFile=/opt/rubituci-ai/shared/.env
+EnvironmentFile=/opt/rubituci-ai/shared/.env.production
+EnvironmentFile=/opt/rubituci-ai/shared/.env.secret
+ExecStart=/opt/rubituci-ai/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8020
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
