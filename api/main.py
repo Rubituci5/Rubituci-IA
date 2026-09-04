@@ -185,6 +185,10 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
 def _google_oauth_ready() -> bool:
     return bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET and settings.GOOGLE_REDIRECT_URI)
 
@@ -360,8 +364,9 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/auth/refresh", response_model=TokenResponse)
-async def refresh_token(refresh_token: str, db: AsyncSession = Depends(get_db)):
+async def refresh_token(request: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
     """Refresh access token."""
+    refresh_token = request.refresh_token
     try:
         token_data = verify_token(refresh_token, "refresh")
     except ValueError as e:
@@ -407,8 +412,9 @@ async def refresh_token(refresh_token: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/auth/logout")
-async def logout(refresh_token: str, db: AsyncSession = Depends(get_db)):
+async def logout(request: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
     """Logout - revoke refresh token."""
+    refresh_token = request.refresh_token
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     result = await db.execute(
         select(SessionModel).where(SessionModel.token_hash == token_hash)
@@ -465,6 +471,20 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found or inactive")
 
     return user
+
+
+@app.get("/api/auth/me")
+async def current_user_profile(user: User = Depends(get_current_user)):
+    """Return the authenticated user's public profile."""
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "username": user.username,
+        "is_admin": user.role == UserRole.ADMIN,
+        "role": user.role.value,
+        "is_verified": user.is_verified,
+        "created_at": user.created_at.isoformat(),
+    }
 
 
 async def get_optional_user(

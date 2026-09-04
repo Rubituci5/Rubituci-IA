@@ -61,8 +61,9 @@ export const useAuthStore = create<AuthState>()(
       },
 
       logout: async () => {
+        const { refreshToken } = get()
         try {
-          await api.post("/auth/logout")
+          if (refreshToken) await api.post("/auth/logout", { refresh_token: refreshToken })
         } catch {}
         api.defaults.headers.common["Authorization"] = ""
         set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false })
