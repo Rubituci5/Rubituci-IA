@@ -69,9 +69,14 @@ export const useEntityStore = create<EntityState>((set, get) => ({
       if (res.ok) {
         const data = await res.json()
         set({
-          evolutionMetrics: data,
-          generation: data.current_generation,
-          generations: data.generations,
+          evolutionMetrics: {
+            generations: get().generations,
+            current_generation: data.current_generation || 1,
+            total_training_steps: data.current_metrics?.steps_completed || 0,
+            total_memories: data.total_experiences || 0,
+            total_beliefs: data.total_beliefs || 0,
+          },
+          generation: data.current_generation || 1,
         })
       }
     } catch (e) {
@@ -106,7 +111,15 @@ export const useEntityStore = create<EntityState>((set, get) => ({
       })
       if (res.ok) {
         const data = await res.json()
-        set({ generations: data })
+        const generations = data.map((item: any) => ({
+          number: item.generation,
+          status: item.status,
+          metrics: item.eval_metrics || {},
+          created_at: item.promoted_at || new Date(0).toISOString(),
+          activated_at: item.promoted_at || undefined,
+          parent_generation: item.parent_generation,
+        }))
+        set(state => ({ generations, evolutionMetrics: state.evolutionMetrics ? { ...state.evolutionMetrics, generations } : null }))
       }
     } catch (e) {
       console.error("Failed to fetch generations:", e)

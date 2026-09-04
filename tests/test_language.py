@@ -26,6 +26,25 @@ def test_public_gate_replaces_broken_generation_with_honest_portuguese():
     assert "após revisão" in response
 
 
+def test_public_gate_answers_daily_learning_intent_without_requesting_a_source():
+    response, accepted = safe_portuguese_response(
+        "d prendccê e utilizera d d com d uti",
+        user_message="Explique algo que aprendeu hoje",
+    )
+    assert not accepted
+    assert response.startswith("Hoje ainda não aprendi nada de novo.")
+    assert "fonte confiável" not in response
+
+
+def test_public_gate_answers_basic_curated_knowledge():
+    response, accepted = safe_portuguese_response(
+        "bras li d d capi",
+        user_message="Qual é a capital do Brasil?",
+    )
+    assert not accepted
+    assert "Brasília" in response
+
+
 def test_public_gate_keeps_clear_answer():
     response, accepted = safe_portuguese_response("A água é importante para a saúde.")
     assert accepted

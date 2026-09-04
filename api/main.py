@@ -8,6 +8,12 @@ import uuid
 import secrets
 import hashlib
 import re
+import json
+import asyncio
+import ipaddress
+import unicodedata
+import base64
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -15,9 +21,10 @@ from typing import Optional
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 from jose import jwt
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
@@ -76,6 +83,10 @@ app = FastAPI(
     redoc_url="/redoc" if settings.ENVIRONMENT != "production" else None,
     lifespan=lifespan,
 )
+
+UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # CORS
 app.add_middleware(
@@ -506,12 +517,39 @@ async def get_optional_user(
     return result.scalar_one_or_none()
 
 
+@app.get("/api/entity/status")
+async def entity_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the live operational state shown by the web interface."""
+    from api.models import ModelGeneration
+    current = (await db.execute(
+        select(ModelGeneration)
+        .where(ModelGeneration.status == "promoted")
+        .order_by(ModelGeneration.generation_number.desc())
+    )).scalar_one_or_none()
+    return {
+        "status": "active" if not kill_switch.paused else "offline",
+        "generation": current.generation_number if current else 1,
+    }
+
+
 # =============================================================================
 # CONVERSATION ENDPOINTS
 # =============================================================================
 
 class ConversationCreate(BaseModel):
     title: Optional[str] = None
+
+
+class ConversationRename(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+
+
+class ImageUpload(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=255)
+    data: str = Field(..., min_length=1, max_length=3_000_000)
 
 
 class ConversationResponse(BaseModel):
@@ -634,6 +672,44 @@ async def get_conversation(
     )
 
 
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationResponse)
+async def rename_conversation(conversation_id: uuid.UUID, request: ConversationRename, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    conversation = (await db.execute(select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conversation.title = re.sub(r"\s+", " ", request.title).strip()[:100]
+    conversation.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return ConversationResponse(id=str(conversation.id), title=conversation.title, generation=conversation.generation, state=conversation.state.value, message_count=conversation.message_count, created_at=conversation.created_at.isoformat(), updated_at=conversation.updated_at.isoformat())
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: uuid.UUID, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    conversation = (await db.execute(select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user.id))).scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await db.delete(conversation)
+    return {"deleted": True}
+
+
+@app.post("/api/uploads/image")
+async def upload_image(request: ImageUpload, user: User = Depends(get_current_user)):
+    match = re.fullmatch(r"data:(image/(?:png|jpeg|webp|gif));base64,(.+)", request.data, re.DOTALL)
+    if not match:
+        raise HTTPException(status_code=400, detail="Formato de imagem inválido")
+    try:
+        payload = base64.b64decode(match.group(2), validate=True)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Imagem inválida")
+    if len(payload) > 2_000_000:
+        raise HTTPException(status_code=413, detail="A imagem deve ter no máximo 2 MB")
+    extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+    extension = extensions[match.group(1)]
+    stored_name = f"{user.id}-{uuid.uuid4().hex}.{extension}"
+    (UPLOAD_DIR / stored_name).write_bytes(payload)
+    return {"url": f"/uploads/{stored_name}", "name": Path(request.filename).name}
+
+
 @app.get("/api/conversations/{conversation_id}/messages", response_model=list[MessageResponse])
 async def get_messages(
     conversation_id: uuid.UUID,
@@ -694,6 +770,11 @@ class ChatResponse(BaseModel):
     inference_time_ms: int
     memories_retrieved: int
     web_sources_used: int
+
+
+class ResearchRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=500)
+    max_results: int = Field(default=5, ge=1, le=10)
 
 
 # Import inference engine (lazy loaded)
@@ -822,7 +903,7 @@ async def chat(
             ),
         )
         from brain.language import safe_portuguese_response
-        response_text, response_accepted = safe_portuguese_response(response_text)
+        response_text, response_accepted = safe_portuguese_response(response_text, user_message=request.message)
         inference_time_ms = int((datetime.now(timezone.utc) - inference_start).total_seconds() * 1000)
     else:
         # Fallback response when model not loaded
@@ -1047,6 +1128,34 @@ async def list_generations(db: AsyncSession = Depends(get_db)):
 # RESEARCH ENDPOINTS
 # =============================================================================
 
+@app.post("/api/research/search")
+async def user_web_search(
+    request: ResearchRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run a user-requested web search and retain source provenance."""
+    from research.web_search import WebSearchService
+    async with WebSearchService(db) as service:
+        results = await service.search(
+            request.query,
+            max_results=request.max_results,
+            trigger_type="user_requested",
+        )
+    return {
+        "query": request.query,
+        "results": [
+            {
+                "title": result.title,
+                "url": result.url,
+                "snippet": result.snippet,
+                "domain": result.domain,
+                "rank": result.rank,
+            }
+            for result in results
+        ],
+    }
+
 @app.get("/api/research/metrics")
 async def research_metrics(db: AsyncSession = Depends(get_db)):
     """Research metrics for analysts."""
@@ -1232,6 +1341,93 @@ async def admin_kill_switch_status(admin: User = Depends(require_admin)):
 # WEBSOCKET (for real-time chat)
 # =============================================================================
 
+_URL_PATTERN = re.compile(r"https?://[^\s<>()\[\]]+", re.I)
+
+
+async def _read_public_page(raw_url: str) -> tuple[str, str, str]:
+    """Read a public HTTP page without allowing access to private network hosts."""
+    from bs4 import BeautifulSoup
+
+    current_url = raw_url.rstrip(".,;:!?\"'")
+    for _ in range(4):
+        parsed = urlparse(current_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("URL inválida")
+        if parsed.hostname.lower() == "localhost":
+            raise ValueError("Endereço local não permitido")
+        addresses = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        if any(ipaddress.ip_address(address[4][0]).is_private or ipaddress.ip_address(address[4][0]).is_loopback or ipaddress.ip_address(address[4][0]).is_link_local for address in addresses):
+            raise ValueError("Endereço privado não permitido")
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False, headers={"User-Agent": settings.WEB_SEARCH_USER_AGENT}) as client:
+            response = await client.get(current_url)
+        if response.status_code in {301, 302, 303, 307, 308} and response.headers.get("location"):
+            current_url = urljoin(current_url, response.headers["location"])
+            continue
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            raise ValueError("O link não contém uma página de texto")
+        soup = BeautifulSoup(response.text[:1_500_000], "html.parser")
+        for node in soup(["script", "style", "noscript", "svg"]):
+            node.decompose()
+        title = soup.title.get_text(" ", strip=True) if soup.title else parsed.hostname
+        text_content = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+        return current_url, title[:300], text_content[:2500]
+    raise ValueError("Redirecionamentos demais")
+
+
+def _relevant_page_excerpt(page_text: str, request: str, limit: int = 900) -> str:
+    """Select page sentences related to the user's request without another model."""
+    stopwords = {"para", "como", "qual", "quais", "essa", "esse", "isso", "site", "pagina", "página", "link", "url", "aqui", "sobre", "traga", "mostre", "encontre"}
+    normalized_request = unicodedata.normalize("NFD", request.lower())
+    terms = {
+        "".join(char for char in word if unicodedata.category(char) != "Mn")
+        for word in re.findall(r"[\wÀ-ÿ]{4,}", normalized_request)
+    } - stopwords
+    sentences = re.split(r"(?<=[.!?])\s+|\s+[|•]\s+", page_text)
+    ranked = []
+    for index, sentence in enumerate(sentences):
+        normalized = unicodedata.normalize("NFD", sentence.lower())
+        normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+        score = sum(1 for term in terms if term in normalized)
+        if score:
+            ranked.append((score, -index, sentence.strip()))
+    selected = [item[2] for item in sorted(ranked, reverse=True)[:4]]
+    excerpt = " ".join(selected) if selected else page_text[:limit]
+    return excerpt[:limit].rsplit(" ", 1)[0]
+
+
+def _looks_like_factual_question(message: str) -> bool:
+    normalized = unicodedata.normalize("NFD", message.lower())
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn").strip()
+    casual = re.fullmatch(r"(?:oi|ola|e ai|fale comigo|vamos conversar|tudo bem|bom dia|boa tarde|boa noite)[.!? ]*", normalized)
+    return not casual and ("?" in message or bool(re.match(r"^(?:quem|qual|quais|quando|onde|como|por que|porque|o que|explique|conte|defina)\b", normalized)))
+
+
+def _request_with_context(message: str, recent_messages: list[Message]) -> str:
+    """Resolve short/referential follow-ups against the latest user turn."""
+    normalized = unicodedata.normalize("NFD", message.lower())
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn").strip()
+    refers_back = bool(re.match(r"^(?:e\b|mas\b|tambem\b|isso\b|esse\b|essa\b|ele\b|ela\b|dela\b|dele\b|por que\b)", normalized))
+    if not refers_back:
+        return message
+    previous_user = next((item.content for item in recent_messages if item.role == MessageRole.USER), "")
+    if not previous_user:
+        return message
+    return f"Contexto anterior do usuário: {previous_user[:700]}\nComplemento atual: {message}"
+
+
+def _contextual_search_answer(results: list, query: str) -> str:
+    """Turn search snippets into a compact contextual answer rather than a result dump."""
+    snippets = []
+    for result in results[:4]:
+        snippet = re.sub(r"\s+", " ", result.snippet or "").strip()
+        if snippet and snippet not in snippets:
+            snippets.append(snippet.rstrip(" .") + ".")
+    context = " ".join(snippets)[:1100]
+    sources = " · ".join(f"[{result.title}]({result.url})" for result in results[:3])
+    return f"Fui conferir porque meu conhecimento local não bastou. Em resumo: {context}\n\nFontes consultadas: {sources}"
+
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, Set
 
@@ -1294,37 +1490,81 @@ async def websocket_chat(
 
     try:
         while True:
-            data = await websocket.receive_text()
+            raw_data = await websocket.receive_text()
+            try:
+                incoming = json.loads(raw_data)
+                data = str(incoming.get("content", "")).strip()
+                web_search_requested = bool(incoming.get("web_search"))
+            except (json.JSONDecodeError, AttributeError):
+                data = raw_data.strip()
+                web_search_requested = False
+
+            if not data:
+                await websocket.send_json({"type": "error", "error": "Mensagem vazia"})
+                continue
+
+            async with db_manager.session() as history_db:
+                recent_messages = list((await history_db.execute(
+                    select(Message)
+                    .where(Message.conversation_id == uuid.UUID(conversation_id))
+                    .order_by(Message.created_at.desc())
+                    .limit(12)
+                )).scalars().all())
+            current_urls = _URL_PATTERN.findall(data)
+            previous_urls = [url for message in recent_messages for url in _URL_PATTERN.findall(message.content)]
+            refers_to_link = bool(re.search(r"\b(url|link|site|página|pagina)\b", data, re.I))
+            provided_url = current_urls[0] if current_urls else (previous_urls[0] if refers_to_link and previous_urls else None)
+            effective_request = _request_with_context(data, recent_messages)
 
             # Generate a real response using the Entity model.
             engine = get_inference_engine()
 
-            if engine is None:
+            if engine is None and not web_search_requested and not provided_url:
                 await websocket.send_json({
                     "type": "error",
                     "error": "Entity model is not loaded",
                 })
                 continue
 
-            from brain.inference import SamplingConfig
-
-            sampling = SamplingConfig(
-                temperature=0.2,
-                top_k=20,
-                top_p=0.9,
-                repetition_penalty=1.15,
-                max_new_tokens=80,
-                do_sample=False,
-            )
-
-            prompt = f"{RUBITUCI_PERSONA}\nUser: {data}\nEntity:"
-
-            response_text = engine.generate(
-                prompt,
-                sampling=sampling,
-            )
-            from brain.language import safe_portuguese_response
-            response_text, _ = safe_portuguese_response(response_text)
+            if provided_url:
+                try:
+                    page_url, page_title, page_text = await _read_public_page(provided_url)
+                    excerpt = _relevant_page_excerpt(page_text, effective_request)
+                    response_text = (
+                        f"Agora sim: abri diretamente **[{page_title}]({page_url})**. "
+                        f"Consegui ler este trecho da página: “{excerpt}”.\n\n"
+                        "Registrei a URL como fonte da conversa. Se quiser, diga qual parte devo analisar — sem sair pesquisando sua frase como uma turista perdida."
+                    )
+                except (ValueError, httpx.HTTPError, OSError) as error:
+                    response_text = f"Reconheci a URL, mas não consegui ler a página: {error}. Confira se ela é pública e tente novamente."
+            elif web_search_requested:
+                from research.web_search import WebSearchService
+                async with db_manager.session() as search_db:
+                    async with WebSearchService(search_db) as search_service:
+                        results = await search_service.search(effective_request, max_results=5, trigger_type="user_requested")
+                if results:
+                    response_text = _contextual_search_answer(results, data)
+                else:
+                    response_text = "Não encontrei resultados úteis agora. A web às vezes também olha para o vazio e finge naturalidade. Tente reformular a busca."
+            else:
+                from brain.inference import SamplingConfig
+                sampling = SamplingConfig(temperature=0.2, top_k=20, top_p=0.9, repetition_penalty=1.15, max_new_tokens=80, do_sample=False)
+                dialogue = "\n".join(
+                    f"{'User' if message.role == MessageRole.USER else 'Entity'}: {message.content[:500]}"
+                    for message in reversed(recent_messages)
+                    if message.role in (MessageRole.USER, MessageRole.ENTITY)
+                )
+                prompt = f"{RUBITUCI_PERSONA}\nConsidere toda a conversa abaixo e trate complementos como continuação, não como assunto novo.\n{dialogue}\nUser: {effective_request}\nEntity:"
+                response_text = engine.generate(prompt, sampling=sampling)
+                from brain.language import safe_portuguese_response
+                response_text, response_accepted = safe_portuguese_response(response_text, user_message=data)
+                if not response_accepted and response_text.startswith("Ainda não manjo") and _looks_like_factual_question(data):
+                    from research.web_search import WebSearchService
+                    async with db_manager.session() as search_db:
+                        async with WebSearchService(search_db) as search_service:
+                            results = await search_service.search(effective_request, max_results=5, trigger_type="knowledge_gap")
+                    if results:
+                        response_text = _contextual_search_answer(results, data)
 
             # WebSocket is the primary frontend path, so persist and learn from
             # its turns just like the HTTP chat endpoint.
@@ -1338,6 +1578,8 @@ async def websocket_chat(
                         entity_message = Message(conversation_id=conversation.id, role=MessageRole.ENTITY, content=response_text, generation=conversation.generation, token_count=len(response_text.split()))
                         learning_db.add_all([user_message, entity_message])
                         await learning_db.flush()
+                        if not conversation.title or conversation.title == "New Conversation":
+                            conversation.title = re.sub(r"\s+", " ", data).strip()[:80]
                         from memory.episodic import EpisodicMemoryService
                         episodic = EpisodicMemoryService(learning_db)
                         await episodic.create_from_interaction(conversation, user_message, importance=0.55)

@@ -15,13 +15,16 @@ interface ChatState {
   error: string | null
   ws: WebSocket | null
 
-  sendMessage: (content: string) => Promise<void>
+  sendMessage: (content: string, options?: { webSearch?: boolean }) => Promise<void>
+  uploadImage: (file: File) => Promise<{ url: string; name: string }>
   retryMessage: (messageId: string) => Promise<void>
   deleteMessage: (messageId: string) => Promise<void>
   submitFeedback: (messageId: string, rating: "positive" | "negative", comment?: string) => Promise<void>
   clearConversation: () => void
   loadConversations: () => Promise<void>
   loadConversation: (id: string) => Promise<void>
+  renameConversation: (id: string, title: string) => Promise<void>
+  deleteConversation: (id: string) => Promise<void>
   createConversation: () => Promise<string>
   connectWebSocket: (conversationId: string) => void
   disconnectWebSocket: () => void
@@ -36,7 +39,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   error: null,
   ws: null,
 
-  sendMessage: async (content) => {
+  sendMessage: async (content, options = {}) => {
     const { accessToken } = useAuthStore.getState()
     const { currentConversationId, messages, connectWebSocket } = get()
 
@@ -71,7 +74,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (socket?.readyState === WebSocket.OPEN) {
             window.clearInterval(timer)
-            socket.send(content)
+            socket.send(JSON.stringify({ content, web_search: Boolean(options.webSearch) }))
             resolve()
             return
           }
@@ -89,9 +92,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  retryMessage: async (messageId) => {
+  uploadImage: async (file) => {
     const { accessToken } = useAuthStore.getState()
-    const { messages, currentConversationId } = get()
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(new Error("Não consegui ler a imagem."))
+      reader.readAsDataURL(file)
+    })
+    const res = await fetch(`${API_URL}/api/uploads/image`, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` }, body: JSON.stringify({ filename: file.name, data }) })
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail || "Falha ao enviar a imagem.")
+    const uploaded = await res.json()
+    return { ...uploaded, url: `${API_URL}${uploaded.url}` }
+  },
+
+  retryMessage: async (messageId) => {
+    const { messages } = get()
 
     const message = messages.find((m) => m.id === messageId)
     if (!message || message.role !== "assistant") return
@@ -101,25 +117,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const userMsg = messages[msgIndex - 1]
     if (!userMsg || userMsg.role !== "user") return
 
-    set({ isLoading: true, error: null })
-
     // Remove the assistant message and any after it
     set({ messages: messages.slice(0, msgIndex) })
-
-    try {
-      const res = await fetch(`${API_URL}/api/conversations/${currentConversationId}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ content: userMsg.content }),
-      })
-
-      if (!res.ok) throw new Error("Failed to retry")
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : "Failed to retry", isLoading: false })
-    }
+    await get().sendMessage(userMsg.content)
   },
 
   deleteMessage: async (messageId) => {
@@ -201,6 +201,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  renameConversation: async (id, title) => {
+    const { accessToken } = useAuthStore.getState()
+    const res = await fetch(`${API_URL}/api/conversations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${accessToken}` }, body: JSON.stringify({ title }) })
+    if (!res.ok) throw new Error("Não foi possível renomear a conversa.")
+    await get().loadConversations()
+  },
+
+  deleteConversation: async (id) => {
+    const { accessToken } = useAuthStore.getState()
+    const res = await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE", headers: { "Authorization": `Bearer ${accessToken}` } })
+    if (!res.ok) throw new Error("Não foi possível excluir a conversa.")
+    if (get().currentConversationId === id) get().clearConversation()
+    await get().loadConversations()
+  },
+
   createConversation: async () => {
     const { accessToken } = useAuthStore.getState()
 
@@ -272,6 +287,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           })
         } else if (msg.type === "done") {
           set({ isLoading: false })
+          get().loadConversations()
         } else if (msg.type === "error") {
           set({ error: msg.error, isLoading: false })
         }

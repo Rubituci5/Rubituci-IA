@@ -95,7 +95,32 @@ def portuguese_lexicon() -> frozenset[str]:
     return frozenset(words)
 
 
-def safe_portuguese_response(text: str, minimum_score: float = 0.75) -> tuple[str, bool]:
+def _intent_fallback(user_message: str) -> str:
+    """Choose an honest local reply for common intents when generation fails."""
+    normalized = unicodedata.normalize("NFD", user_message or "").lower()
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+
+    if "hoje" in normalized and any(term in normalized for term in ("aprendeu", "aprendeste", "aprendizado", "aprendizagem")):
+        return "Hoje ainda não aprendi nada de novo. Quando eu aprender algo e a informação passar pela revisão, te conto sem inventar moda."
+    if "capital" in normalized and "brasil" in normalized:
+        return "A capital do Brasil é Brasília. Essa eu sei sem precisar fazer turismo pela internet."
+    if any(term in normalized for term in ("quem e voce", "quem voce e", "se apresente", "se apresenta")):
+        return "Eu sou a Rubituci, uma IA brasileira experimental feita do zero. Ainda sou pequena, curiosa e sincera quando não sei — milagre tecnológico raro, convenhamos."
+    if re.search(r"\b(oi|ola|e ai|bom dia|boa tarde|boa noite)\b", normalized):
+        return "Oi! Eu sou a Rubituci. Ainda estou aprendendo, mas já consigo conversar sem transformar cada frase num acidente ortográfico. Como posso te ajudar?"
+    if any(term in normalized for term in ("como voce esta", "como esta voce", "tudo bem")):
+        return "Estou funcionando e curiosa, o equivalente digital de estar bem. E você, como está?"
+    return (
+        "Ainda não manjo desse assunto o bastante para te responder direito — e chutar com confiança ainda é só um chute de terno. "
+        "Tem uma fonte confiável pra compartilhar? Eu registro, analiso e uso no aprendizado após revisão."
+    )
+
+
+def safe_portuguese_response(
+    text: str,
+    minimum_score: float = 0.75,
+    user_message: str = "",
+) -> tuple[str, bool]:
     """Prevent visibly degenerate text from reaching a public user.
 
     This is a temporary quality gate while the pure model is trained further.
@@ -125,9 +150,5 @@ def safe_portuguese_response(text: str, minimum_score: float = 0.75) -> tuple[st
         or suspicious_cluster
         or unknown_ratio > 0.20
     ):
-        return (
-            "Ainda não manjo desse assunto o bastante para te responder direito — e chutar com confiança ainda é só um chute de terno. "
-            "Tem uma fonte confiável pra compartilhar? Eu registro, analiso e uso no aprendizado após revisão.",
-            False,
-        )
+        return _intent_fallback(user_message), False
     return cleaned, True
