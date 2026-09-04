@@ -9,7 +9,6 @@ O projeto não usa um grande modelo comercial escondido por trás da interface. 
 ## Experimente
 
 - Aplicação pública: [rubituci.com.br](https://rubituci.com.br)
-- Site anteriormente hospedado na Rubituci: [nexusdc.com.br](https://nexusdc.com.br)
 - Bugs e ideias: [GitHub Issues](https://github.com/Rubituci5/Rubituci-IA/issues)
 
 ## Propósito
