@@ -902,8 +902,7 @@ async def chat(
                 stop_sequences=["\nUser:", "\nEntity:", "\nUsuário:", "\nRubituci:"],
             ),
         )
-        from brain.language import safe_portuguese_response
-        response_text, response_accepted = safe_portuguese_response(response_text, user_message=request.message)
+        response_text = response_text.strip()
         inference_time_ms = int((datetime.now(timezone.utc) - inference_start).total_seconds() * 1000)
     else:
         # Fallback response when model not loaded
@@ -919,7 +918,7 @@ async def chat(
         token_count=len(response_text.split()),
         inference_time_ms=inference_time_ms,
         memories_retrieved=[str(m.id) for m in memories],
-        metadata_={"language_quality_accepted": response_accepted} if engine else {},
+        metadata_={"raw_model_output": True} if engine else {},
     )
     db.add(entity_message)
 
@@ -1548,23 +1547,14 @@ async def websocket_chat(
                     response_text = "Não encontrei resultados úteis agora. A web às vezes também olha para o vazio e finge naturalidade. Tente reformular a busca."
             else:
                 from brain.inference import SamplingConfig
-                sampling = SamplingConfig(temperature=0.2, top_k=20, top_p=0.9, repetition_penalty=1.15, max_new_tokens=80, do_sample=False)
+                sampling = SamplingConfig(temperature=0.65, top_k=30, top_p=0.9, repetition_penalty=1.12, max_new_tokens=120, do_sample=True)
                 dialogue = "\n".join(
                     f"{'User' if message.role == MessageRole.USER else 'Entity'}: {message.content[:500]}"
                     for message in reversed(recent_messages)
                     if message.role in (MessageRole.USER, MessageRole.ENTITY)
                 )
                 prompt = f"{RUBITUCI_PERSONA}\nConsidere toda a conversa abaixo e trate complementos como continuação, não como assunto novo.\n{dialogue}\nUser: {effective_request}\nEntity:"
-                response_text = engine.generate(prompt, sampling=sampling)
-                from brain.language import safe_portuguese_response
-                response_text, response_accepted = safe_portuguese_response(response_text, user_message=data)
-                if not response_accepted and response_text.startswith("Ainda não manjo") and _looks_like_factual_question(data):
-                    from research.web_search import WebSearchService
-                    async with db_manager.session() as search_db:
-                        async with WebSearchService(search_db) as search_service:
-                            results = await search_service.search(effective_request, max_results=5, trigger_type="knowledge_gap")
-                    if results:
-                        response_text = _contextual_search_answer(results, data)
+                response_text = engine.generate(prompt, sampling=sampling).strip()
 
             # WebSocket is the primary frontend path, so persist and learn from
             # its turns just like the HTTP chat endpoint.
