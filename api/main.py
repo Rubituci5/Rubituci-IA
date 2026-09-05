@@ -1427,6 +1427,36 @@ def _contextual_search_answer(results: list, query: str) -> str:
     sources = " · ".join(f"[{result.title}]({result.url})" for result in results[:3])
     return f"Fui conferir porque meu conhecimento local não bastou. Em resumo: {context}\n\nFontes consultadas: {sources}"
 
+
+def _learning_dialogue_reply(message: str, recent_messages: list[Message]) -> Optional[str]:
+    """Support immediate teach/acknowledge/recall loops inside a conversation."""
+    normalized = unicodedata.normalize("NFD", message.lower())
+    normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn").strip()
+    user_history = [item.content for item in recent_messages if item.role == MessageRole.USER]
+
+    def topic_from(text_value: str) -> Optional[str]:
+        plain = unicodedata.normalize("NFD", text_value.lower())
+        plain = "".join(char for char in plain if unicodedata.category(char) != "Mn")
+        match = re.search(r"(?:sabe|voce sabe)?\s*como (?:se )?faz(?:er)?\s+(?:um |uma |o |a )?([^?.,!]+)", plain)
+        return match.group(1).strip() if match else None
+
+    # A short follow-up asks for knowledge taught earlier in this same chat.
+    if re.search(r"\b(?:entao\s+)?como (?:se )?faz", normalized):
+        instruction = next((text_value for text_value in user_history if len(text_value.split()) >= 7 and not topic_from(text_value)), None)
+        if instruction:
+            cleaned_instruction = re.sub(r"\s+", " ", instruction).strip()
+            return f"Como você me ensinou: {cleaned_instruction}"
+
+    previous_topic = next((topic_from(text_value) for text_value in user_history if topic_from(text_value)), None)
+    looks_like_lesson = len(message.split()) >= 7 and bool(re.search(r"\b(?:primeiro|depois|adicione|coloque|misture|leve|use|para fazer|ate ferver|até ferver)\b", normalized))
+    if looks_like_lesson and previous_topic:
+        return f"Obrigado, agora já sei como fazer {previous_topic}. Guardei sua explicação nesta conversa e vou dizer que aprendi com você quando eu a recuperar."
+
+    current_topic = topic_from(message)
+    if current_topic:
+        return f"Ainda não sei como fazer {current_topic}, mas adoraria aprender. Você me ensina?"
+    return None
+
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, Set
 
@@ -1517,6 +1547,7 @@ async def websocket_chat(
             refers_to_link = bool(re.search(r"\b(url|link|site|página|pagina)\b", data, re.I))
             provided_url = current_urls[0] if current_urls else (previous_urls[0] if refers_to_link and previous_urls else None)
             effective_request = _request_with_context(data, recent_messages)
+            learning_reply = _learning_dialogue_reply(data, recent_messages)
 
             # Generate a real response using the Entity model.
             engine = get_inference_engine()
@@ -1528,7 +1559,9 @@ async def websocket_chat(
                 })
                 continue
 
-            if provided_url:
+            if learning_reply:
+                response_text = learning_reply
+            elif provided_url:
                 try:
                     page_url, page_title, page_text = await _read_public_page(provided_url)
                     excerpt = _relevant_page_excerpt(page_text, effective_request)

@@ -7,6 +7,7 @@ No external tokenizer dependencies (no tiktoken, no HuggingFace tokenizers).
 
 import json
 import regex as re
+from functools import lru_cache
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -248,7 +249,8 @@ class BPETokenizer:
 
         return tokens
 
-    def _encode_word(self, word: str) -> List[int]:
+    @lru_cache(maxsize=100_000)
+    def _encode_word(self, word: str) -> Tuple[int, ...]:
         """Encode a single word using BPE merges."""
         # Split into characters
         tokens = list(word)
@@ -285,7 +287,7 @@ class BPETokenizer:
                 else:
                     ids.append(self.unk_token_id)
 
-        return ids
+        return tuple(ids)
 
     def decode(self, ids: List[int], skip_special_tokens: bool = True) -> str:
         """
