@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Rubituci training blocks while the production host is idle
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=10min
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

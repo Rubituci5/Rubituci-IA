@@ -71,20 +71,19 @@ class EntityConfig:
 
     @property
     def num_parameters(self) -> int:
-        """Estimate number of parameters (approximate)."""
-        # Embeddings
-        embed_params = self.vocab_size * self.d_model * 2  # token + position
+        """Estimate trainable parameters for the current tied-head RoPE model."""
+        # Token embeddings are shared with the output head; RoPE has no weights.
+        embed_params = self.vocab_size * self.d_model
         # Transformer layers
         layer_params = self.n_layers * (
             # Attention: Q, K, V, O projections
             4 * self.d_model * self.d_model +
-            # FFN: up, down projections
-            2 * self.d_model * self.d_ff +
-            # LayerNorms: 2 per layer (attention + ffn)
-            4 * self.d_model
+            # SwiGLU FFN: gate, up, and down projections
+            3 * self.d_model * self.d_ff +
+            # Two RMSNorms per layer
+            2 * self.d_model
         )
-        # Final LayerNorm + output projection
-        final_params = 2 * self.d_model + self.d_model * self.vocab_size
+        final_params = self.d_model
         return embed_params + layer_params + final_params
 
     def to_dict(self) -> dict:
