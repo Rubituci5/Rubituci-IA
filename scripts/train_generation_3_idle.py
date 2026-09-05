@@ -33,6 +33,7 @@ REPORT = GEN_DIR / "idle_training_report.json"
 CACHE = GEN_DIR / "training_tokens.pt"
 ACCESS_LOG = Path(os.environ.get("RUBITUCI_ACCESS_LOG", "/var/log/nginx/access.log"))
 SEQUENCE_LENGTH = 128
+TARGET_TOKENS = 1_000_000_000
 
 
 def load_portuguese_corpus() -> list[str]:
@@ -89,7 +90,10 @@ def save_checkpoint(model: EntityTransformer, optimizer: torch.optim.Optimizer, 
     temporary = CHECKPOINT.with_suffix(".tmp")
     torch.save({"model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "config": config.to_dict(), **state}, temporary)
     temporary.replace(CHECKPOINT)
-    REPORT.write_text(json.dumps({key: value for key, value in state.items() if isinstance(value, (str, int, float, bool, type(None)))}, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = {key: value for key, value in state.items() if isinstance(value, (str, int, float, bool, type(None)))}
+    report["target_tokens"] = TARGET_TOKENS
+    report["progress_percent"] = round(min(100.0, state["tokens_seen"] / TARGET_TOKENS * 100), 8)
+    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
@@ -119,6 +123,9 @@ def main() -> None:
         if previous.get("optimizer_state_dict"):
             optimizer.load_state_dict(previous["optimizer_state_dict"])
         state.update({key: previous.get(key, value) for key, value in state.items()})
+    if state["tokens_seen"] >= TARGET_TOKENS:
+        print(f"Meta concluída: {state['tokens_seen']:,}/{TARGET_TOKENS:,} tokens", flush=True)
+        return
     if args.initialize_only:
         save_checkpoint(model, optimizer, config, state)
         print(f"Checkpoint inicial criado com {sum(parameter.numel() for parameter in model.parameters()):,} parâmetros", flush=True)
@@ -127,6 +134,8 @@ def main() -> None:
     access_mtime = ACCESS_LOG.stat().st_mtime if ACCESS_LOG.exists() else 0
     model.train()
     for _ in range(max(1, args.steps)):
+        if state["tokens_seen"] >= TARGET_TOKENS:
+            break
         if ACCESS_LOG.exists() and ACCESS_LOG.stat().st_mtime > access_mtime:
             print("Bloco interrompido: novo acesso ao site", flush=True)
             break
@@ -142,6 +151,7 @@ def main() -> None:
         state["tokens_seen"] += SEQUENCE_LENGTH
         state["last_loss"] = float(loss.item())
         state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        state["target_tokens"] = TARGET_TOKENS
         print(f"step={state['step']} tokens={state['tokens_seen']} loss={state['last_loss']:.4f}", flush=True)
     save_checkpoint(model, optimizer, config, state)
 
