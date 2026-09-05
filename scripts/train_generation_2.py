@@ -24,9 +24,9 @@ GEN_DIR = ROOT / "snapshots" / "generation_000002"
 MODEL_PATH = GEN_DIR / "model_weights_rubituci_gen2.pt"
 REPORT_PATH = GEN_DIR / "training_report.json"
 MINIMUM_TOKENS = 10_000_000
-SEQUENCE_LENGTH = 128
-BATCH_SIZE = 32
-STEPS = 4224
+SEQUENCE_LENGTH = 256
+BATCH_SIZE = 4
+STEPS = 11264
 
 
 def choose_device() -> torch.device:

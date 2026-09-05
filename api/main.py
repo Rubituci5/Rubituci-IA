@@ -43,7 +43,7 @@ from api.security import (
 )
 from api.models import (
     User, Session as SessionModel, Conversation, Message,
-    EpisodicMemory, WebQuery, WebSource, Feedback,
+    EpisodicMemory, SemanticMemory, WebQuery, WebSource, Feedback,
     UserRole, MessageRole, OperationalState, EventType,
 )
 from api.observability import setup_observability, get_metrics
@@ -1428,7 +1428,7 @@ def _contextual_search_answer(results: list, query: str) -> str:
     return f"Fui conferir porque meu conhecimento local não bastou. Em resumo: {context}\n\nFontes consultadas: {sources}"
 
 
-def _learning_dialogue_reply(message: str, recent_messages: list[Message]) -> Optional[str]:
+async def _learning_dialogue_reply(message: str, recent_messages: list[Message], db: AsyncSession) -> Optional[str]:
     """Support immediate teach/acknowledge/recall loops inside a conversation."""
     normalized = unicodedata.normalize("NFD", message.lower())
     normalized = "".join(char for char in normalized if unicodedata.category(char) != "Mn").strip()
@@ -1437,7 +1437,7 @@ def _learning_dialogue_reply(message: str, recent_messages: list[Message]) -> Op
     def topic_from(text_value: str) -> Optional[str]:
         plain = unicodedata.normalize("NFD", text_value.lower())
         plain = "".join(char for char in plain if unicodedata.category(char) != "Mn")
-        match = re.search(r"(?:sabe|voce sabe)?\s*como (?:se )?faz(?:er)?\s+(?:um |uma |o |a )?([^?.,!]+)", plain)
+        match = re.search(r"(?:voce\s+)?(?:sabe\s+)?(?:como\s+)?faz(?:er)?\s+(?:um |uma |o |a )?([^?.,!]+)", plain)
         return match.group(1).strip() if match else None
 
     # A short follow-up asks for knowledge taught earlier in this same chat.
@@ -1450,10 +1450,40 @@ def _learning_dialogue_reply(message: str, recent_messages: list[Message]) -> Op
     previous_topic = next((topic_from(text_value) for text_value in user_history if topic_from(text_value)), None)
     looks_like_lesson = len(message.split()) >= 7 and bool(re.search(r"\b(?:primeiro|depois|adicione|coloque|misture|leve|use|para fazer|ate ferver|até ferver)\b", normalized))
     if looks_like_lesson and previous_topic:
+        learned = (await db.execute(
+            select(SemanticMemory).where(
+                SemanticMemory.concept == previous_topic,
+                SemanticMemory.category == "community_taught",
+            )
+        )).scalars().first()
+        if learned:
+            learned.representation = re.sub(r"\s+", " ", message).strip()
+            learned.evidence_count += 1
+            learned.last_reinforced = datetime.now(timezone.utc)
+        else:
+            db.add(SemanticMemory(
+                concept=previous_topic,
+                category="community_taught",
+                representation=re.sub(r"\s+", " ", message).strip(),
+                confidence=0.5,
+                evidence_count=1,
+                generation=1,
+                last_reinforced=datetime.now(timezone.utc),
+            ))
         return f"Obrigado, agora já sei como fazer {previous_topic}. Guardei sua explicação nesta conversa e vou dizer que aprendi com você quando eu a recuperar."
 
     current_topic = topic_from(message)
+    if not current_topic and len(message.split()) <= 3:
+        current_topic = previous_topic
     if current_topic:
+        learned = (await db.execute(
+            select(SemanticMemory)
+            .where(SemanticMemory.concept == current_topic, SemanticMemory.category == "community_taught")
+            .order_by(SemanticMemory.last_reinforced.desc().nullslast())
+        )).scalars().first()
+        if learned:
+            learned.last_reinforced = datetime.now(timezone.utc)
+            return f"Aprendi isso com a comunidade: {learned.representation}"
         return f"Ainda não sei como fazer {current_topic}, mas adoraria aprender. Você me ensina?"
     return None
 
@@ -1547,7 +1577,8 @@ async def websocket_chat(
             refers_to_link = bool(re.search(r"\b(url|link|site|página|pagina)\b", data, re.I))
             provided_url = current_urls[0] if current_urls else (previous_urls[0] if refers_to_link and previous_urls else None)
             effective_request = _request_with_context(data, recent_messages)
-            learning_reply = _learning_dialogue_reply(data, recent_messages)
+            async with db_manager.session() as knowledge_db:
+                learning_reply = await _learning_dialogue_reply(data, recent_messages, knowledge_db)
 
             # Generate a real response using the Entity model.
             engine = get_inference_engine()
