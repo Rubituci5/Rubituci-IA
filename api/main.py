@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -777,6 +777,89 @@ class ResearchRequest(BaseModel):
     max_results: int = Field(default=5, ge=1, le=10)
 
 
+class TeachingRequest(BaseModel):
+    subject: str = Field(..., min_length=2, max_length=500)
+    content: str = Field(..., min_length=3, max_length=20000)
+    source_url: Optional[str] = Field(default=None, max_length=2048)
+
+
+def _normalize_concept(value: str) -> str:
+    value = unicodedata.normalize("NFD", value.lower())
+    value = "".join(char for char in value if unicodedata.category(char) != "Mn")
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()[:500]
+
+
+def _analyze_knowledge(subject: str, content: str) -> str:
+    """Convert a lesson into auditable semantic units instead of a verbatim chat replay."""
+    cleaned = re.sub(r"[ \t]+", " ", content).strip()
+    sentences = [part.strip(" -•\t") for part in re.split(r"(?<=[.!?;])\s+|\n+", cleaned) if len(part.strip()) >= 3]
+    procedural_markers = r"\b(?:primeiro|depois|em seguida|por fim|coloque|adicione|misture|leve|use|faça|faca|retire|espere)\b"
+    knowledge_type = "procedure" if sum(bool(re.search(procedural_markers, item, re.I)) for item in sentences) >= 1 else "fact"
+    stopwords = {"para", "como", "uma", "com", "que", "isso", "esse", "essa", "dos", "das", "por", "seu", "sua", "sobre", "fonte", "compartilhada"}
+    words = re.findall(r"[\wÀ-ÿ]{3,}", f"{subject} {cleaned}".lower())
+    keywords = list(dict.fromkeys(word for word in words if word not in stopwords))[:18]
+    payload = {
+        "version": 1,
+        "subject": re.sub(r"\s+", " ", subject).strip(),
+        "type": knowledge_type,
+        "units": sentences[:30] or [cleaned],
+        "keywords": keywords,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _render_knowledge(memory: SemanticMemory, question: str) -> str:
+    """Compose an answer for the current intent from semantic units; supports legacy memories."""
+    try:
+        payload = json.loads(memory.representation)
+    except (json.JSONDecodeError, TypeError):
+        return f"Aprendi isso com a comunidade: {memory.representation}"
+    units = [str(unit).strip() for unit in payload.get("units", []) if str(unit).strip()]
+    subject = payload.get("subject") or memory.concept
+    if not units:
+        return f"Tenho uma memória sobre {subject}, mas ela ficou incompleta. A ironia veio pronta; o conhecimento, nem tanto."
+    if payload.get("type") == "procedure" or re.search(r"\bcomo\b", question, re.I):
+        steps = "\n".join(f"{index}. {unit[0].upper() + unit[1:]}" for index, unit in enumerate(units, 1))
+        return f"Aprendi com a comunidade como fazer {subject}. O processo é:\n{steps}"
+    return f"Sobre {subject}, o que aprendi foi: {' '.join(units)}"
+
+
+async def _remember_knowledge(
+    db: AsyncSession,
+    *,
+    subject: str,
+    content: str,
+    category: str,
+    confidence: float,
+) -> SemanticMemory:
+    """Upsert globally available knowledge without retraining model weights."""
+    concept = _normalize_concept(subject)
+    cleaned = _analyze_knowledge(subject, content)
+    memory = (await db.execute(
+        select(SemanticMemory)
+        .where(SemanticMemory.concept == concept, SemanticMemory.category == category)
+        .order_by(SemanticMemory.last_reinforced.desc().nullslast())
+    )).scalars().first()
+    if memory:
+        memory.representation = cleaned
+        memory.evidence_count += 1
+        memory.confidence = min(0.95, max(memory.confidence, confidence) + 0.03)
+        memory.last_reinforced = datetime.now(timezone.utc)
+        return memory
+    memory = SemanticMemory(
+        concept=concept,
+        category=category,
+        representation=cleaned,
+        confidence=confidence,
+        evidence_count=1,
+        generation=1,
+        last_reinforced=datetime.now(timezone.utc),
+    )
+    db.add(memory)
+    await db.flush()
+    return memory
+
+
 # Import inference engine (lazy loaded)
 _inference_engine = None
 
@@ -1127,6 +1210,54 @@ async def list_generations(db: AsyncSession = Depends(get_db)):
 # RESEARCH ENDPOINTS
 # =============================================================================
 
+async def _enrich_taught_knowledge(subject: str) -> None:
+    """Quietly research a taught subject and retain source-backed complementary memory."""
+    from research.web_search import WebSearchService
+    try:
+        async with db_manager.session() as db:
+            async with WebSearchService(db) as service:
+                results = await service.search(subject, max_results=5, trigger_type="autonomous")
+            context = " ".join(
+                re.sub(r"\s+", " ", result.snippet or "").strip()
+                for result in results[:4]
+                if result.snippet
+            )[:5000]
+            if context:
+                sources = " ".join(result.url for result in results[:3])
+                await _remember_knowledge(
+                    db,
+                    subject=subject,
+                    content=f"{context} Fontes consultadas: {sources}",
+                    category="web_learned",
+                    confidence=0.48,
+                )
+    except Exception as error:
+        print(f"Background knowledge enrichment failed for {subject!r}: {error}")
+
+
+@app.post("/api/learning/teach", status_code=201)
+async def teach_knowledge(
+    request: TeachingRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store an explicit community lesson in the global semantic memory."""
+    source_note = f" Fonte compartilhada: {request.source_url}" if request.source_url else ""
+    memory = await _remember_knowledge(
+        db,
+        subject=request.subject,
+        content=f"{request.content}{source_note}",
+        category="community_taught",
+        confidence=0.55,
+    )
+    background_tasks.add_task(_enrich_taught_knowledge, request.subject.strip())
+    return {
+        "id": str(memory.id),
+        "subject": request.subject.strip(),
+        "message": f"Aprendi sobre {request.subject.strip()} e já deixei isso disponível para toda a comunidade.",
+    }
+
 @app.post("/api/research/search")
 async def user_web_search(
     request: ResearchRequest,
@@ -1457,14 +1588,14 @@ async def _learning_dialogue_reply(message: str, recent_messages: list[Message],
             )
         )).scalars().first()
         if learned:
-            learned.representation = re.sub(r"\s+", " ", message).strip()
+            learned.representation = _analyze_knowledge(previous_topic, message)
             learned.evidence_count += 1
             learned.last_reinforced = datetime.now(timezone.utc)
         else:
             db.add(SemanticMemory(
                 concept=previous_topic,
                 category="community_taught",
-                representation=re.sub(r"\s+", " ", message).strip(),
+                representation=_analyze_knowledge(previous_topic, message),
                 confidence=0.5,
                 evidence_count=1,
                 generation=1,
@@ -1483,8 +1614,40 @@ async def _learning_dialogue_reply(message: str, recent_messages: list[Message],
         )).scalars().first()
         if learned:
             learned.last_reinforced = datetime.now(timezone.utc)
-            return f"Aprendi isso com a comunidade: {learned.representation}"
+            return _render_knowledge(learned, message)
+        query_terms = set(_normalize_concept(current_topic).split())
+        candidates = (await db.execute(
+            select(SemanticMemory)
+            .where(SemanticMemory.category.in_(["community_taught", "web_learned"]))
+            .order_by(SemanticMemory.last_reinforced.desc().nullslast())
+            .limit(250)
+        )).scalars().all()
+        ranked = sorted(
+            ((len(query_terms & set(candidate.concept.split())), candidate) for candidate in candidates),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if ranked and ranked[0][0] > 0:
+            ranked[0][1].last_reinforced = datetime.now(timezone.utc)
+            return _render_knowledge(ranked[0][1], message)
         return f"Ainda não sei como fazer {current_topic}, mas adoraria aprender. Você me ensina?"
+    if _looks_like_factual_question(message):
+        ignored = {"qual", "quais", "como", "quem", "onde", "quando", "porque", "sobre", "voce", "sabe", "fale", "explique"}
+        query_terms = {term for term in _normalize_concept(message).split() if len(term) > 2 and term not in ignored}
+        candidates = (await db.execute(
+            select(SemanticMemory)
+            .where(SemanticMemory.category.in_(["community_taught", "web_learned"]))
+            .order_by(SemanticMemory.last_reinforced.desc().nullslast())
+            .limit(250)
+        )).scalars().all()
+        ranked = sorted(
+            ((len(query_terms & set(candidate.concept.split())), candidate) for candidate in candidates),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if ranked and ranked[0][0] > 0:
+            ranked[0][1].last_reinforced = datetime.now(timezone.utc)
+            return _render_knowledge(ranked[0][1], message)
     return None
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -1596,10 +1759,40 @@ async def websocket_chat(
                 try:
                     page_url, page_title, page_text = await _read_public_page(provided_url)
                     excerpt = _relevant_page_excerpt(page_text, effective_request)
+                    async with db_manager.session() as web_learning_db:
+                        query_record = WebQuery(
+                            query=effective_request[:2000],
+                            trigger_type="user_requested",
+                            generation=1,
+                            results_count=1,
+                            metadata_={"mode": "direct_page_learning"},
+                        )
+                        web_learning_db.add(query_record)
+                        await web_learning_db.flush()
+                        web_learning_db.add(WebSource(
+                            query_id=query_record.id,
+                            url=page_url,
+                            domain=urlparse(page_url).hostname,
+                            title=page_title[:500],
+                            content=page_text[:50000],
+                            snippet=excerpt,
+                            credibility=0.5,
+                            source_type="web_page",
+                            language="pt",
+                            content_hash=hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+                            metadata_={"learned_immediately": True},
+                        ))
+                        await _remember_knowledge(
+                            web_learning_db,
+                            subject=page_title,
+                            content=f"{excerpt} Fonte: {page_url}",
+                            category="web_learned",
+                            confidence=0.5,
+                        )
                     response_text = (
                         f"Agora sim: abri diretamente **[{page_title}]({page_url})**. "
                         f"Consegui ler este trecho da página: “{excerpt}”.\n\n"
-                        "Registrei a URL como fonte da conversa. Se quiser, diga qual parte devo analisar — sem sair pesquisando sua frase como uma turista perdida."
+                        "Aprendi esse conteúdo na memória global e registrei a URL como fonte. Se quiser, diga qual parte devo analisar — sem sair pesquisando sua frase como uma turista perdida."
                     )
                 except (ValueError, httpx.HTTPError, OSError) as error:
                     response_text = f"Reconheci a URL, mas não consegui ler a página: {error}. Confira se ela é pública e tente novamente."
@@ -1608,6 +1801,21 @@ async def websocket_chat(
                 async with db_manager.session() as search_db:
                     async with WebSearchService(search_db) as search_service:
                         results = await search_service.search(effective_request, max_results=5, trigger_type="user_requested")
+                    if results:
+                        learned_context = " ".join(
+                            re.sub(r"\s+", " ", result.snippet or "").strip()
+                            for result in results[:4]
+                            if result.snippet
+                        )[:4000]
+                        if learned_context:
+                            source_list = " ".join(result.url for result in results[:3])
+                            await _remember_knowledge(
+                                search_db,
+                                subject=effective_request,
+                                content=f"{learned_context} Fontes: {source_list}",
+                                category="web_learned",
+                                confidence=0.45,
+                            )
                 if results:
                     response_text = _contextual_search_answer(results, data)
                 else:
