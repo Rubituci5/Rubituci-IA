@@ -5,7 +5,7 @@ import { Search, Loader2, Globe, FileText, TrendingUp, Clock, ExternalLink } fro
 import { useEntity } from "@/hooks/useEntity"
 import { useAuthStore } from "@/hooks/useAuth"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+const API_URL = process.env.NEXT_PUBLIC_API_URL || ""
 
 export default function ResearchPage() {
   const { researchMetrics, fetchResearch, triggerResearch } = useEntity()

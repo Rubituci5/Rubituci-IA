@@ -5,7 +5,9 @@ import { persist } from "zustand/middleware"
 import { User } from "@/types"
 import axios from "axios"
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+// Empty means same-origin. This keeps production on the public domain even if
+// a build-time environment variable is accidentally omitted.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || ""
 
 const api = axios.create({
   baseURL: `${API_URL}/api`,

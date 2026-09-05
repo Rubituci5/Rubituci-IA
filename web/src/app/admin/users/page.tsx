@@ -5,7 +5,7 @@ import { useAuthStore } from "@/hooks/useAuth"
 
 type Account={id:string;username:string;email:string;role:string;provider:string;verified:boolean;active:boolean;created_at:string;last_login:string|null;session_count:number}
 type DailyAccess={date:string;accesses:number;unique_users:number}
-const API=process.env.NEXT_PUBLIC_API_URL||"http://localhost:8000"
+const API=process.env.NEXT_PUBLIC_API_URL||""
 function csvCell(value:unknown){return `"${String(value??"").replaceAll('"','""')}"`}
 
 export default function UsersAdminPage(){
