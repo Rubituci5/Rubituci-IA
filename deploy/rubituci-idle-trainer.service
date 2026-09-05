@@ -9,9 +9,9 @@ Group=rubituci
 SupplementaryGroups=adm
 WorkingDirectory=/opt/rubituci-ai/current
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/nice -n 15 /opt/rubituci-ai/venv/bin/python3 scripts/train_generation_3_idle.py --steps 2
+ExecStart=/usr/bin/nice -n 15 /opt/rubituci-ai/venv/bin/python3 scripts/train_generation_3_idle.py --steps 1
 CPUQuota=200%
 MemoryMax=10G
 Nice=15
 IOSchedulingClass=idle
-TimeoutStartSec=45min
+TimeoutStartSec=2h

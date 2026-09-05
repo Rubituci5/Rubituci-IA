@@ -30,6 +30,7 @@ from brain.tokenizer import EntityTokenizer
 GEN_DIR = ROOT / "snapshots" / "generation_000003"
 CHECKPOINT = GEN_DIR / "idle_checkpoint.pt"
 REPORT = GEN_DIR / "idle_training_report.json"
+CACHE = GEN_DIR / "training_tokens.pt"
 ACCESS_LOG = Path(os.environ.get("RUBITUCI_ACCESS_LOG", "/var/log/nginx/access.log"))
 SEQUENCE_LENGTH = 128
 
@@ -66,12 +67,22 @@ def host_ready() -> tuple[bool, str]:
 
 
 def make_stream(tokenizer: EntityTokenizer) -> torch.Tensor:
+    if CACHE.exists():
+        stream = torch.load(CACHE, map_location="cpu", weights_only=True)
+        if isinstance(stream, torch.Tensor) and stream.numel() > SEQUENCE_LENGTH:
+            print(f"Cache carregado: {stream.numel():,} tokens", flush=True)
+            return stream
     ids: list[int] = []
     for text in load_portuguese_corpus():
         ids.extend(tokenizer.encode(text, add_special_tokens=True))
     if len(ids) <= SEQUENCE_LENGTH:
         raise RuntimeError("Corpus insuficiente")
-    return torch.tensor(ids, dtype=torch.long)
+    stream = torch.tensor(ids, dtype=torch.long)
+    temporary = CACHE.with_suffix(".tmp")
+    torch.save(stream, temporary)
+    temporary.replace(CACHE)
+    print(f"Cache criado: {stream.numel():,} tokens", flush=True)
+    return stream
 
 
 def save_checkpoint(model: EntityTransformer, optimizer: torch.optim.Optimizer, config: EntityConfig, state: dict) -> None:
@@ -85,9 +96,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--initialize-only", action="store_true")
+    parser.add_argument("--prepare-cache", action="store_true")
     args = parser.parse_args()
     ready, reason = host_ready()
-    if not ready and not args.initialize_only:
+    if not ready and not args.initialize_only and not args.prepare_cache:
         print(f"Bloco adiado: {reason}", flush=True)
         return
     torch.set_num_threads(max(1, min(4, (os.cpu_count() or 2) // 2)))
@@ -95,6 +107,9 @@ def main() -> None:
     torch.manual_seed(42)
     tokenizer = EntityTokenizer.from_pretrained(GEN_DIR / "tokenizer")
     config = EntityConfig.load(GEN_DIR / "config.json")
+    if args.prepare_cache:
+        make_stream(tokenizer)
+        return
     model = EntityTransformer(config)
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=0.01)
     state = {"generation": 3, "step": 0, "tokens_seen": 0, "last_loss": None, "promotion_allowed": False}
