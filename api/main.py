@@ -791,8 +791,13 @@ def _normalize_concept(value: str) -> str:
 
 def _analyze_knowledge(subject: str, content: str) -> str:
     """Convert a lesson into auditable semantic units instead of a verbatim chat replay."""
-    cleaned = re.sub(r"[ \t]+", " ", content).strip()
-    sentences = [part.strip(" -•\t") for part in re.split(r"(?<=[.!?;])\s+|\n+", cleaned) if len(part.strip()) >= 3]
+    sources = _URL_PATTERN.findall(content)
+    cleaned = _URL_PATTERN.sub("", content)
+    cleaned = re.sub(r"\b(?:fontes? consultadas?|fonte compartilhada)\s*:\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+    raw_sentences = [part.strip(" -•\t") for part in re.split(r"(?<=[.!?;])\s+|\n+", cleaned) if len(part.strip()) >= 3]
+    boilerplate = re.compile(r"(?:creative commons|atribui[cç][aã]o|termos da licen[cç]a|condi[cç][oõ]es de utiliza[cç][aã]o)", re.I)
+    sentences = [part for part in raw_sentences if not boilerplate.search(part)]
     procedural_markers = r"\b(?:primeiro|depois|em seguida|por fim|coloque|adicione|misture|leve|use|faça|faca|retire|espere)\b"
     knowledge_type = "procedure" if sum(bool(re.search(procedural_markers, item, re.I)) for item in sentences) >= 1 else "fact"
     stopwords = {"para", "como", "uma", "com", "que", "isso", "esse", "essa", "dos", "das", "por", "seu", "sua", "sobre", "fonte", "compartilhada"}
@@ -804,6 +809,7 @@ def _analyze_knowledge(subject: str, content: str) -> str:
         "type": knowledge_type,
         "units": sentences[:30] or [cleaned],
         "keywords": keywords,
+        "sources": sources[:10],
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -816,6 +822,7 @@ def _render_knowledge(memory: SemanticMemory, question: str) -> str:
         return f"Aprendi isso com a comunidade: {memory.representation}"
     units = [str(unit).strip() for unit in payload.get("units", []) if str(unit).strip()]
     subject = payload.get("subject") or memory.concept
+    subject = re.sub(r"^(?:quem|o que|qual)\s+(?:é|e)\s+(?:a|o|um|uma)?\s*", "", subject, flags=re.I).strip(" ?.!") or subject
     if not units:
         return f"Tenho uma memória sobre {subject}, mas ela ficou incompleta. A ironia veio pronta; o conhecimento, nem tanto."
     if payload.get("type") == "procedure" or re.search(r"\bcomo\b", question, re.I):
@@ -1624,7 +1631,7 @@ async def _learning_dialogue_reply(message: str, recent_messages: list[Message],
         )).scalars().all()
         ranked = sorted(
             ((len(query_terms & set(candidate.concept.split())), candidate) for candidate in candidates),
-            key=lambda item: item[0],
+            key=lambda item: (item[0], item[1].category == "community_taught", item[1].confidence),
             reverse=True,
         )
         if ranked and ranked[0][0] > 0:
@@ -1642,7 +1649,7 @@ async def _learning_dialogue_reply(message: str, recent_messages: list[Message],
         )).scalars().all()
         ranked = sorted(
             ((len(query_terms & set(candidate.concept.split())), candidate) for candidate in candidates),
-            key=lambda item: item[0],
+            key=lambda item: (item[0], item[1].category == "community_taught", item[1].confidence),
             reverse=True,
         )
         if ranked and ranked[0][0] > 0:
